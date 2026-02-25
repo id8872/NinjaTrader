@@ -48,7 +48,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 
     public class Optimus : Indicator
     {
-        private string sVersion = "1.4";
+        private string sVersion = "1.9 (True Order Flow & ATR)";
+        long iAsk, iBid;
+        int iCurrBar;
 
         #region VARIABLES
 
@@ -77,6 +79,9 @@ namespace NinjaTrader.NinjaScript.Indicators
         private string sndSell = NinjaTrader.Core.Globals.InstallDir + @"\sounds\Sell.wav";
         private string sndImb = NinjaTrader.Core.Globals.InstallDir + @"\sounds\Imbalance.wav";
 
+        private SimpleFont sfStandard;
+        private SimpleFont sfDot;
+
         #endregion
 
         #region STATE CHANGES
@@ -85,19 +90,17 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             if (State == State.SetDefaults)
             {
-                Description = @"Optimus Prime Indicator by TraderOracle";
+                Description = @"Optimus Prime Indicator by TraderOracle - Dynamic ATR, Chop Filter & Order Flow Edition";
                 Name = "OptimusNinja";
                 Calculate = Calculate.OnBarClose;
                 IsOverlay = true;
-                //Disable this property if your indicator requires custom values that cumulate with each new market data event. 
-                //See Help Guide for additional information.
                 IsSuspendedWhileInactive = true;
 
-                VI_Brush = Brushes.MediumPurple;
+                VI_Brush = Brushes.AliceBlue;
                 Green_Brush = Brushes.Lime;
                 Red_Brush = Brushes.Red;
 
-                iMinADX = 0;
+                iMinADX = 20; 
                 iTextSize = 9;
                 iDotSize = 12;
                 iTickOffset = 7;
@@ -109,7 +112,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 iWaddahBuffer = 80;
                 iLindaIntense = 40;
 
-                bShowTramp = true;          // SHOW
+                bShowTramp = true;          
                 bShowMACDPSARArrow = true;
                 bShowRegularBuySell = true;
                 bVolumeImbalances = true;
@@ -117,7 +120,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 bShowRevPattern = true;
                 bShowSquare = false;
 
-                bUseFisher = true;          // USE
+                bUseFisher = true;          
                 bUseWaddah = true;
                 bUseT3 = true;
                 bUsePSAR = true;
@@ -150,18 +153,32 @@ namespace NinjaTrader.NinjaScript.Indicators
                 topSeries = new Series<double>(this, MaximumBarsLookBack.TwoHundredFiftySix);
                 bottomSeries = new Series<double>(this, MaximumBarsLookBack.TwoHundredFiftySix);
                 atrSeries = new Series<double>(this, MaximumBarsLookBack.TwoHundredFiftySix);
+
+                sfStandard = new SimpleFont() { Size = iTextSize, Bold = false };
+                sfDot = new SimpleFont() { Size = iDotSize, Bold = false };
             }
         }
 
         #endregion
+
+        protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
+        {
+            if (BarsInProgress == 1)
+            {
+                if (marketDataUpdate.MarketDataType == MarketDataType.Ask)
+                    iAsk += marketDataUpdate.Volume;
+                else if (marketDataUpdate.MarketDataType == MarketDataType.Bid)
+                    iBid += marketDataUpdate.Volume;
+            }
+        }
 
         protected override void OnBarUpdate()
         {
             if (BarsInProgress != 0)
                 return;
 
-			if (CurrentBar > 22)
-            	TotalBars();
+            if (CurrentBar > 22)
+                TotalBars();
         }
 
         private void TotalBars()
@@ -171,22 +188,53 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             #region INDICATOR CALCULATIONS
 
-            var upTrades = Volume[0] * (Close[0] - Low[0]) / (High[0] - Low[0]);
-            var dnTrades = Volume[0] * (High[0] - Close[0]) / (High[0] - Low[0]);
-            var pupTrades = Volume[1] * (Close[1] - Low[1]) / (High[1] - Low[1]);
-            var pdnTrades = Volume[1] * (High[1] - Close[1]) / (High[1] - Low[1]);
+            Bollinger myBB = Bollinger(2, 20);
+            KeltnerChannel myKC = KeltnerChannel(2, 20);
+            MACD myMACD = MACD(20, 40, 9);
+            
+            double atrVal = ATR(14)[0];
 
-            // Awesome Oscillator
+            // --- NEW: True Order Flow Volume (with Proxy Fallback) ---
+            double upTrades = 0;
+            double dnTrades = 0;
+            double pupTrades = 0;
+            double pdnTrades = 0;
+
+            BarsTypes.VolumetricBarsType barsType = Bars.BarsSeries.BarsType as BarsTypes.VolumetricBarsType;
+            if (barsType != null)
+            {
+                // Pull actual aggressive order flow data from the chart
+                upTrades = barsType.Volumes[CurrentBar].TotalBuyingVolume;
+                dnTrades = barsType.Volumes[CurrentBar].TotalSellingVolume;
+                
+                if (CurrentBar > 0)
+                {
+                    pupTrades = barsType.Volumes[CurrentBar - 1].TotalBuyingVolume;
+                    pdnTrades = barsType.Volumes[CurrentBar - 1].TotalSellingVolume;
+                }
+            }
+            else
+            {
+                // Fallback to proxy math if loaded on a non-volumetric chart (standard time/tick charts)
+                double range0 = High[0] - Low[0] == 0 ? 1 : High[0] - Low[0]; // prevent division by zero
+                double range1 = High[1] - Low[1] == 0 ? 1 : High[1] - Low[1];
+
+                upTrades = Volume[0] * (Close[0] - Low[0]) / range0;
+                dnTrades = Volume[0] * (High[0] - Close[0]) / range0;
+                pupTrades = Volume[1] * (Close[1] - Low[1]) / range1;
+                pdnTrades = Volume[1] * (High[1] - Close[1]) / range1;
+            }
+            // ---------------------------------------------------------
+
             bool bAOGreen = false;
             AO[0] = SMA(Median, 5)[0] - SMA(Median, 34)[0];
             if (AO[0] > AO[1])
                 bAOGreen = true;
 
-            // SQUEEZE 
-            double bbt = Bollinger(2, 20).Upper[0];
-            double bbb = Bollinger(2, 20).Lower[0];
-            double kct = KeltnerChannel(2, 20).Upper[0];
-            double kcb = KeltnerChannel(2, 20).Lower[0];
+            double bbt = myBB.Upper[0];
+            double bbb = myBB.Lower[0];
+            double kct = myKC.Upper[0];
+            double kcb = myKC.Lower[0];
 
             bool sqzOn = (bbb > kcb) && (bbt < kct);
             bool sqzOff = (bbb < kcb) && (bbt > kct);
@@ -207,7 +255,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 sqeezeUp = true;
                 if (SqueezeDef[0] < SqueezeDef[1] && !sqRelaxUp && bShowSqueeze)
                 {
-                    DrawText("✦", Brushes.Yellow, false, true);
+                    DrawText("✦", Brushes.Yellow, atrVal, false, true);
                     sqRelaxUp = true;
                 }
             }
@@ -215,29 +263,24 @@ namespace NinjaTrader.NinjaScript.Indicators
             {
                 if (SqueezeDef[0] > SqueezeDef[1] && sqRelaxUp && bShowSqueeze)
                 {
-                    DrawText("✦", Brushes.Yellow, false, true);
+                    DrawText("✦", Brushes.Yellow, atrVal, false, true);
                     sqRelaxUp = false;
                 }
             }
 
-            // Linda MACD
             double lindaMD = 0;
             MACD1[0] = EMAF[0] - EMAS[0];
             lindaMD = MACD1[0] - SMA(MACD1, 16)[0];
             bool macdUp = lindaMD > 0;
 
-            //Print("Linda = " + lindaMD.ToString());
-            //DrawText(lindaMD.ToString(), Brushes.White);
-
             var filteredLinda = Math.Min(Math.Abs(lindaMD) * iLindaIntense, 255);
             var cCoLorLinda = lindaMD > 0 ? Color.FromArgb(255, 0, (byte)filteredLinda, 0) : Color.FromArgb(255, (byte)filteredLinda, 0, 0);
 
-            double Trend1, Trend2, Explo1, Explo2, Dead;
-            Trend1 = (MACD(20, 40, 9)[0] - MACD(20, 40, 9)[1]) * iWaddahIntense;
-            Trend2 = (MACD(20, 40, 9)[2] - MACD(20, 40, 9)[3]) * iWaddahIntense;
-            Explo1 = Bollinger(2, 20).Upper[0] - Bollinger(2, 20).Lower[0];
-            Explo2 = Bollinger(2, 20).Upper[1] - Bollinger(2, 20).Lower[1];
-            Dead = TickSize * 30;
+            double Trend1, Trend2, Explo1, Explo2;
+            Trend1 = (myMACD[0] - myMACD[1]) * iWaddahIntense;
+            Trend2 = (myMACD[2] - myMACD[3]) * iWaddahIntense;
+            Explo1 = bbt - bbb;
+            Explo2 = myBB.Upper[1] - myBB.Lower[1];
             bool wadaUp = Trend1 >= 0 ? true : false;
 
             var waddah = Math.Min(Math.Abs(Trend1) + iWaddahBuffer, 255);
@@ -245,19 +288,15 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             Supertrend st = Supertrend(2, 11);
             bool superUp = st.Value[0] < Low[0] ? true : false;
-            //bool superUp = Default[0] < Low[0] ? true : false;
 
             FisherTransform ft = FisherTransform(10);
             bool fisherUp = ft.Value[0] > ft.Value[1] ? true : false;
 
-            //WaddahAttarExplosion wae = WaddahAttarExplosion(150, 30, 15, 1, false, 1, false, false, false, false);
-
             ParabolicSAR sar = ParabolicSAR(0.02, 0.2, 0.02);
             bool psarUp = sar.Value[0] < Low[0] ? true : false;
 
-            Bollinger bb = Bollinger(2, 20);
-            double bb_top = bb.Values[0][0];
-            double bb_bottom = bb.Values[2][0];
+            double bb_top = myBB.Values[0][0];
+            double bb_bottom = myBB.Values[2][0];
 
             HMA hma = HMA(14);
             bool hullUp = hma.Value[0] > hma.Value[1];
@@ -266,6 +305,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             bool t3Up = Close[0] > t3.Value[0];
 
             ADX x = ADX(10);
+            bool isTrending = x.Value[0] >= Math.Max(1, iMinADX); 
             
             KAMA kama = KAMA(2, 9, 109);
             if (bShowKAMA9)
@@ -277,7 +317,6 @@ namespace NinjaTrader.NinjaScript.Indicators
             bool adxvmaDN = false;
             if (lizADXVMA)
             {
-                // Contribution from smitty4728 on Discord
                 var amaADXVMAPlus1 = amaADXVMAPlus(Close, false, 8, 8, 8);
                 adxvmaUP = amaADXVMAPlus1.Trend[0] == 1;
                 adxvmaDN = amaADXVMAPlus1.Trend[0] == -1;
@@ -335,15 +374,12 @@ namespace NinjaTrader.NinjaScript.Indicators
             var c4Body = Math.Abs(Close[4] - Open[4]);
 
             var upWickLarger = c0R && Math.Abs(High[0] - Open[0]) > Math.Abs(Low[0] - Close[0]);
-
             var downWickLarger = c0G && Math.Abs(Low[0] - Open[0]) > Math.Abs(Close[0] - High[0]);
 
             var ThreeOutUp = c2R && c1G && c0G && Open[1] < Close[2] && Open[2] < Close[1] && Math.Abs(Open[1] - Close[1]) > Math.Abs(Open[2] - Close[2]) && Close[0] > Low[1];
-
             var ThreeOutDown = c2G && c1R && c0R && Open[1] > Close[2] && Open[2] > Close[1] && Math.Abs(Open[1] - Close[1]) > Math.Abs(Open[2] - Close[2]) && Close[0] < Low[1];
 
             var eqHigh = c0R && c1R && c2G && c3G && (High[1] > bb_top || High[2] > bb_top) && Close[0] < Close[1] && (Open[1] == Close[2] || Open[1] == Close[2] + TickSize || Open[1] + TickSize == Close[2]);
-
             var eqLow = c0G && c1G && c2R && c3R && (Low[1] < bb_bottom || Low[2] < bb_bottom) && Close[0] > Close[1] && (Open[1] == Close[2] || Open[1] == Close[2] + TickSize || Open[1] + TickSize == Close[2]);
 
             #endregion
@@ -351,9 +387,9 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (bShowSquare)
             {
                 if (upTrades > pdnTrades && upTrades > pupTrades && upTrades > dnTrades && Low[0] < bb_bottom)
-                    Draw.Square(this, "AS" + CurrentBar, true, 0, Low[0] - (TickSize * 10), Green_Brush);
+                    Draw.Square(this, "AS" + CurrentBar, true, 0, Low[0] - (atrVal * 0.2), Green_Brush);
                 if (dnTrades > pupTrades && dnTrades > pdnTrades && dnTrades > upTrades && High[0] > bb_top)
-                    Draw.Square(this, "BB" + CurrentBar, true, 0, High[0] + (TickSize * 10), Red_Brush);
+                    Draw.Square(this, "BB" + CurrentBar, true, 0, High[0] + (atrVal * 0.2), Red_Brush);
             }
 
             #region VOLUME IMBALANCE
@@ -365,9 +401,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 {
                     if (High[0] > li.loc && Low[0] < li.loc)
                     {
-                        //Print(li.tag);
                         int barsAgo = (CurrentBar - Convert.ToInt16(li.tag));
-                        //Print(barsAgo);
                         Draw.Line(this, li.tag, 0, li.loc, barsAgo, li.loc, VI_Brush);
                         ll.RemoveAt(ix);
                         break;
@@ -377,7 +411,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 
                 if (green && c1G && Open[0] > Close[1])
                 {
-                    //DrawText("▲", Brushes.Lime, false, true);
                     Draw.Line(this, CurrentBar.ToString(), 1, Open[0], -600, Open[0], VI_Brush);
                     lines li = new lines() { loc = Open[0], tag = CurrentBar.ToString() };
                     ll.Add(li);
@@ -385,11 +418,9 @@ namespace NinjaTrader.NinjaScript.Indicators
                         Alert("Alert", Priority.Medium, "Volume Imbalance BUY", sndImb, 10, Brushes.Black, Brushes.BlanchedAlmond);
                     if (bSendEmail)
                         SendMail(sEmailAddress, "Volume Imbalance BUY", "Volume Imbalance BUY " + Instrument + " " + Close[0].ToString());
-                    //Draw.Line(this, tag, true, DateTime.Today.AddDays(-0.4), Open[0], DateTime.Now, Open[0], Brushes.MediumPurple, DashStyleHelper.Dash, 1);
                 }
                 if (red && c1R && Open[0] < Close[1])
                 {
-                    //DrawText("▼", Brushes.Orange, false, true);
                     Draw.Line(this, CurrentBar.ToString(), 1, Open[0], -600, Open[0], VI_Brush);
                     lines li = new lines() { loc = Open[0], tag = CurrentBar.ToString() };
                     ll.Add(li);
@@ -416,19 +447,9 @@ namespace NinjaTrader.NinjaScript.Indicators
                 (!lizSuperUP && lizSUPER) ||
                 (!lizTSIUp && lizMultiTSI) ||
                 (!adxvmaUP && lizADXVMA) ||
-                x.Value[0] < iMinADX || 
                 (bUseHMA && !hullUp) || 
                 (bUseAO && !bAOGreen))
                 bShowUp = false;
-
-            if (green && bShowUp && bShowRegularBuySell)
-            {
-                DrawText("▴", Green_Brush, false, true);
-                if (bPlaySounds)
-                    Alert("Alert", Priority.Medium, "Standard BUY", sndBuy, 10, Brushes.Black, Brushes.BlanchedAlmond);
-                if (bSendEmail)
-                    SendMail(sEmailAddress, "Standard BUY", "Standard BUY " + Instrument + " " + Close[0].ToString());
-            }
 
             // ========================    DOWN CONDITIONS    =========================
 
@@ -442,14 +463,28 @@ namespace NinjaTrader.NinjaScript.Indicators
                 (!lizSuperDN && lizSUPER) ||
                 (!lizTSIDN && lizMultiTSI) ||
                 (!adxvmaDN && lizADXVMA) ||
-                x.Value[0] < iMinADX || 
                 (bUseHMA && hullUp) || 
                 (bUseAO && bAOGreen))
                 bShowDown = false;
 
+            if (!isTrending)
+            {
+                bShowUp = false;
+                bShowDown = false;
+            }
+
+            if (green && bShowUp && bShowRegularBuySell)
+            {
+                DrawText("▴", Green_Brush, atrVal, false, true);
+                if (bPlaySounds)
+                    Alert("Alert", Priority.Medium, "Standard BUY", sndBuy, 10, Brushes.Black, Brushes.BlanchedAlmond);
+                if (bSendEmail)
+                    SendMail(sEmailAddress, "Standard BUY", "Standard BUY " + Instrument + " " + Close[0].ToString());
+            }
+
             if (red && bShowDown && bShowRegularBuySell)
             {
-                DrawText("▾", Red_Brush, false, true);
+                DrawText("▾", Red_Brush, atrVal, false, true);
                 if (bPlaySounds)
                     Alert("Alert", Priority.Medium, "Standard SELL", sndSell, 10, Brushes.Black, Brushes.BlanchedAlmond);
                 if (bSendEmail)
@@ -461,45 +496,41 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (c4Body > c3Body && c3Body > c2Body && c2Body > c1Body && c1Body > c0Body)
                     if ((Close[0] > Close[1] && Close[1] > Close[2] && Close[2] > Close[3]) ||
                     (Close[0] < Close[1] && Close[1] < Close[2] && Close[2] < Close[3]))
-                        DrawText("Stairs", Brushes.Yellow);
+                        DrawText("Stairs", Brushes.Yellow, atrVal);
 
                 if (eqHigh)
-                {
-                    DrawText("Eq Hi", Brushes.Yellow, false, true);
-                }
+                    DrawText("Eq Hi", Brushes.Yellow, atrVal, false, true);
 
                 if (eqLow)
-                {
-                    DrawText("Eq Low", Brushes.Yellow, false, true);
-                }
+                    DrawText("Eq Low", Brushes.Yellow, atrVal, false, true);
             }
 
             if (bShowRevPattern)
             {
                 if (c0R && High[0] > bb_top && Open[0] < bb_top && Open[0] > Close[1] && upWickLarger)
-                    DrawText("Wick", Brushes.Yellow, false, true);
+                    DrawText("Wick", Brushes.Yellow, atrVal, false, true);
                 if (c0G && Low[0] < bb_bottom && Open[0] > bb_bottom && Open[0] > Close[1] && downWickLarger)
-                    DrawText("Wick", Brushes.Yellow, false, true);
+                    DrawText("Wick", Brushes.Yellow, atrVal, false, true);
 
                 if (ThreeOutUp)
-                    DrawText("3oU", Brushes.Yellow);
+                    DrawText("3oU", Brushes.Yellow, atrVal);
                 if (ThreeOutDown)
-                    DrawText("3oD", Brushes.Yellow);
+                    DrawText("3oD", Brushes.Yellow, atrVal);
             }
 
             if (bShowTramp)
             {
                 if (c0R && c1R && Close[0] < Close[1] && (rsi.Value[0] >= 70 || rsi.Value[1] >= 70 || rsi.Value[2] >= 70) &&
-                    c2G && High[2] >= (bb_top - (TickSize * 30)))
-                    DrawText("TR", Brushes.Yellow, false, true);
+                    c2G && High[2] >= (bb_top - (atrVal * 0.5)))
+                    DrawText("TR", Brushes.Yellow, atrVal, false, true);
                 if (c0G && c1G && Close[0] > Close[1] && (rsi.Value[0] < 25 || rsi.Value[1] < 25 || rsi.Value[2] < 25) &&
-                    c2R && Low[2] <= (bb_bottom + (TickSize * 30)))
-                    DrawText("TR", Brushes.Yellow, false, true);
+                    c2R && Low[2] <= (bb_bottom + (atrVal * 0.5)))
+                    DrawText("TR", Brushes.Yellow, atrVal, false, true);
             }
 
-            if (Trend1 > Explo1 && psarUp && !bBigArrowUp && bShowMACDPSARArrow)
+            if (isTrending && Trend1 > Explo1 && psarUp && !bBigArrowUp && bShowMACDPSARArrow)
             {
-                Draw.ArrowUp(this, "A" + CurrentBar, true, 0, Low[0] - TickSize * 7, Green_Brush);
+                Draw.ArrowUp(this, "A" + CurrentBar, true, 0, Low[0] - (atrVal * 0.2), Green_Brush);
                 bBigArrowUp = true;
                 if (bPlaySounds)
                     PlaySound(Core.Globals.InstallDir + @"\sounds\Buy.wav");
@@ -507,9 +538,9 @@ namespace NinjaTrader.NinjaScript.Indicators
                     SendMail(sEmailAddress, "MACD/PSAR BUY", "MACD/PSAR BUY " + Instrument + " " + Close[0].ToString());
             }
 
-            if (Trend1 < 0 && Math.Abs(Trend1) > Explo1 && !psarUp && bBigArrowUp && bShowMACDPSARArrow)
+            if (isTrending && Trend1 < 0 && Math.Abs(Trend1) > Explo1 && !psarUp && bBigArrowUp && bShowMACDPSARArrow)
             {
-                Draw.ArrowDown(this, "A" + CurrentBar, true, 0, High[0] + TickSize * 7, Red_Brush);
+                Draw.ArrowDown(this, "A" + CurrentBar, true, 0, High[0] + (atrVal * 0.2), Red_Brush);
                 bBigArrowUp = false;
                 if (bPlaySounds)
                     PlaySound(Core.Globals.InstallDir + @"\sounds\Sell.wav");
@@ -522,18 +553,25 @@ namespace NinjaTrader.NinjaScript.Indicators
             #region OTHER STUFF
 
             if (bWaddahCandle)
-                BarBrush = new SolidColorBrush(cCoLorWaddah);
+            {
+                SolidColorBrush wBrush = new SolidColorBrush(cCoLorWaddah);
+                wBrush.Freeze();
+                BarBrush = wBrush;
+            }
 
             if (bLindaCandle)
-                BarBrush = new SolidColorBrush(cCoLorLinda);
+            {
+                SolidColorBrush lBrush = new SolidColorBrush(cCoLorLinda);
+                lBrush.Freeze();
+                BarBrush = lBrush;
+            }
 
             if (bShowEvilTimes)
             {
                 string evil = EvilTimes(Bars.GetTime(0));
                 if (evil != "" && evil != PrevEvil)
                 {
-                    DrawText(evil, Red_Brush, false, true);
-                    //Draw.TextFixed(this, "ET" + CurrentBar, evil, TextPosition.BottomRight);
+                    DrawText(evil, Red_Brush, atrVal, false, true);
                     PrevEvil = evil;
                 }
             }
@@ -569,9 +607,6 @@ namespace NinjaTrader.NinjaScript.Indicators
             var nA250 = _highest - 2.5 * r;
             var nA2618 = _highest - 2.618 * r;
 
-            Print(Bars.BarsSinceNewTradingDay);
-            Print(CurrentBar);
-
             int ixBar = Bars.BarsSinceNewTradingDay;
 
             Draw.Line(this, "lix1" + CurrentBar, ixBar, A05, 0, A05, Brushes.White);
@@ -591,7 +626,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             Draw.Line(this, "lix15" + CurrentBar, ixBar, nA2618, 0, nA2618, Brushes.White);
         }
 
-        protected void DrawText(String strX, Brush br, bool bOverride = false, bool bSwap = false)
+        protected void DrawText(String strX, Brush br, double atrVal, bool bOverride = false, bool bSwap = false)
         {
             Brush brFinal;
             double loc = 0;
@@ -599,10 +634,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             int zero = 0;
             int iOffsetMe = 0;
             SolidColorBrush backGround = Brushes.Transparent;
-
-            SimpleFont sf = new SimpleFont();
-            sf.Bold = false;
-            sf.Size = iTextSize;
+            SimpleFont sfToUse = sfStandard;
 
             if (strX.Contains("Eq"))
             {
@@ -610,21 +642,24 @@ namespace NinjaTrader.NinjaScript.Indicators
                 zero = 1;
             }
 
+            double offsetDistance = atrVal * (iTickOffset * 0.02);
+
             if (Close[zero] > Open[zero] || bOverride)
-                loc = High[zero] + (TickSize * iTickOffset);
+                loc = High[zero] + offsetDistance;
             else
-                loc = Low[zero] - (TickSize * iTickOffset);
+                loc = Low[zero] - offsetDistance;
 
             if (Close[zero] > Open[zero] && bSwap)
-                loc = Low[zero] - (TickSize * iTickOffset);
+                loc = Low[zero] - offsetDistance;
             else if (Close[zero] < Open[zero] && bSwap)
-                loc = High[zero] + (TickSize * iTickOffset);
+                loc = High[zero] + offsetDistance;
 
-            brFinal = loc == High[zero] + (TickSize * iTickOffset) ? Red_Brush :Green_Brush;
+            brFinal = loc == High[zero] + offsetDistance ? Red_Brush : Green_Brush;
+            
             if (strX.Contains("▾") || strX.Contains("▴") || strX.Contains("✦"))
             {
                 brFinal = br;
-                sf.Size = iDotSize;
+                sfToUse = sfDot;
                 backGround = Brushes.Transparent;
             }
             if (strX.Contains("Eq") || strX.Contains("3o"))
@@ -637,8 +672,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 iOffsetMe = 150;
             }
 
-            //Draw.Text(this, "D" + bar, strX, zero, loc, brFinal);
-            Draw.Text(this, "D" + bar, true, strX, zero, loc, iOffsetMe, br, sf, 
+            Draw.Text(this, "D" + bar, true, strX, zero, loc, iOffsetMe, br, sfToUse, 
                 TextAlignment.Center, Brushes.Transparent, backGround, 40);
         }
 
@@ -804,8 +838,6 @@ namespace NinjaTrader.NinjaScript.Indicators
         [Display(Name = "Indicator Version", GroupName = "Advanced", Order = 17)]
         public string myVersion { get; set; }
 
-        //////////////////////////////////////////////////////////////////////////////
-
         [NinjaScriptProperty]
         [Display(Name = "Show Waddah Candles", GroupName = "Colored Candles", Order = 1)]
         public bool bWaddahCandle { get; set; }
@@ -828,24 +860,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         [XmlIgnore]
         [Display(Name = "Volume Imbalance Color", GroupName = "Colors", Order = 1)]
-        public Brush VI_Brush
-        { get; set; }
+        public Brush VI_Brush { get; set; }
 
         [XmlIgnore]
         [Display(Name = "Green Global Color", GroupName = "Colors", Order = 2)]
-        public Brush Green_Brush
-        { get; set; }
+        public Brush Green_Brush { get; set; }
 
         [XmlIgnore]
         [Display(Name = "Red Global Color", GroupName = "Colors", Order = 3)]
-        public Brush Red_Brush
-        { get; set; }
-
-
+        public Brush Red_Brush { get; set; }
 
         #endregion
     }
-
 }
 
 #region NinjaScript generated code. Neither change nor remove.
@@ -904,3 +930,4 @@ namespace NinjaTrader.NinjaScript.Strategies
 }
 
 #endregion
+
